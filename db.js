@@ -4,9 +4,15 @@ if (!process.env.DATABASE_URL) {
   throw new Error('DATABASE_URL is missing')
 }
 
-const ssl = process.env.PG_SSL_CA
-  ? { rejectUnauthorized: true, ca: process.env.PG_SSL_CA }
-  : { rejectUnauthorized: false }
+let ca = ''
+
+if (process.env.PG_SSL_CA_B64) {
+  ca = Buffer.from(process.env.PG_SSL_CA_B64, 'base64').toString('utf8')
+} else if (process.env.PG_SSL_CA) {
+  ca = process.env.PG_SSL_CA
+}
+
+const ssl = ca ? { rejectUnauthorized: true, ca } : { rejectUnauthorized: false }
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
