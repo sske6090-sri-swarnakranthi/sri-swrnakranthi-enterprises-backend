@@ -1,175 +1,236 @@
 const router = require('express').Router()
 const pool = require('../db')
 
-const toInt = (v) => {
-  const n = Number(v)
-  return Number.isInteger(n) && n > 0 ? n : null
+const toText = (v) => {
+  if (v === undefined || v === null) return ''
+  const s = String(v).trim()
+  return s
 }
 
-const toNum = (v) => {
+const safeNum = (v) => {
   const n = Number(v)
   return Number.isFinite(n) ? n : 0
 }
 
-const toText = (v) => {
-  if (v === undefined || v === null) return null
-  const s = String(v).trim()
-  return s ? s : null
-}
-
-const normMobile = (v) => String(v || '').replace(/\D/g, '').slice(0, 10)
-
-router.post('/web/place', async (req, res) => {
-  const uidRaw = req.body?.user_id
-  const uid = uidRaw === null || uidRaw === undefined || uidRaw === '' ? null : toInt(uidRaw)
-
-  const total_amount = toNum(req.body?.total_amount)
-
-  const customer_name = toText(req.body?.customer_name)
-  const customer_email = toText(req.body?.customer_email)
-  const customer_mobile = normMobile(req.body?.customer_mobile)
-
-  const shipping_address_line1 = toText(req.body?.shipping_address_line1)
-  const shipping_address_line2 = toText(req.body?.shipping_address_line2)
-  const shipping_city = toText(req.body?.shipping_city)
-  const shipping_state = toText(req.body?.shipping_state)
-  const shipping_pincode = String(req.body?.shipping_pincode || '').replace(/\D/g, '').slice(0, 6)
-  const shipping_country = toText(req.body?.shipping_country) || 'India'
-
-  const payment_method = 'COD'
-  const payment_status = 'pending'
-  const order_status = 'placed'
-  const payment_ref = null
-
-  const items = Array.isArray(req.body?.items) ? req.body.items : []
-
-  if (!total_amount || total_amount <= 0) return res.status(400).json({ message: 'total_amount required' })
-  if (!customer_name) return res.status(400).json({ message: 'customer_name required' })
-  if (!customer_mobile || customer_mobile.length !== 10) return res.status(400).json({ message: 'customer_mobile required' })
-  if (!shipping_address_line1) return res.status(400).json({ message: 'shipping_address_line1 required' })
-  if (!shipping_city) return res.status(400).json({ message: 'shipping_city required' })
-  if (!shipping_state) return res.status(400).json({ message: 'shipping_state required' })
-  if (!shipping_pincode || shipping_pincode.length !== 6) return res.status(400).json({ message: 'shipping_pincode required' })
-  if (!items.length) return res.status(400).json({ message: 'items required' })
-
-  const client = await pool.connect()
+router.get('/web/by-user', async (req, res) => {
   try {
-    await client.query('BEGIN')
+    const email = toText(req.query.email).toLowerCase()
+    const mobile = toText(req.query.mobile).replace(/\D/g, '').slice(0, 10)
 
-    if (uid) {
-      const userOk = await client.query('SELECT 1 FROM users WHERE id = $1', [uid])
-      if (!userOk.rowCount) {
-        await client.query('ROLLBACK')
-        return res.status(400).json({ message: 'Invalid user_id (no such user)' })
-      }
+    if (!email && !mobile) return res.status(400).json({ message: 'email or mobile required' })
+
+    const params = []
+    const ors = []
+
+    if (email) {
+      params.push(email)
+      ors.push(`LOWER(o.customer_email) = $${params.length}`)
     }
 
-    const orderInsert = await client.query(
+    if (mobile) {
+      params.push(mobile)
+      ors.push(`regexp_replace(o.customer_mobile,'\\D','','g') = $${params.length}`)
+    }
+
+    const whereSql = ors.length ? `WHERE (${ors.join(' OR ')})` : ''
+
+    const ordersQ = await pool.query(
       `
-      INSERT INTO orders (
-        user_id,
-        total_amount,
-        payment_status,
-        order_status,
-        customer_name,
-        customer_email,
-        customer_mobile,
-        shipping_address_line1,
-        shipping_address_line2,
-        shipping_city,
-        shipping_state,
-        shipping_pincode,
-        shipping_country,
-        payment_method,
-        payment_ref
-      )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-      RETURNING id, created_at
+      SELECT
+        o.id,
+        o.user_id,
+        o.total_amount,
+        o.payment_status,
+        o.order_status,
+        o.payment_method,
+        o.created_at,
+        o.customer_name,
+        o.customer_email,
+        o.customer_mobile,
+        o.shipping_address_line1,
+        o.shipping_address_line2,
+        o.shipping_city,
+        o.shipping_state,
+        o.shipping_pincode,
+        o.shipping_country,
+        o.payment_ref
+      FROM orders o
+      ${whereSql}
+      ORDER BY o.created_at DESC NULLS LAST, o.id DESC
+      LIMIT 200
       `,
-      [
-        uid,
-        total_amount,
-        payment_status,
-        order_status,
-        customer_name,
-        customer_email,
-        customer_mobile,
-        shipping_address_line1,
-        shipping_address_line2,
-        shipping_city,
-        shipping_state,
-        shipping_pincode,
-        shipping_country,
-        payment_method,
-        payment_ref
-      ]
+      params
     )
 
-    const orderId = orderInsert.rows[0].id
+    if (!ordersQ.rowCount) return res.json([])
 
-    for (const it of items) {
-      const product_id = toInt(it?.product_id ?? it?.id)
-      const quantity = toInt(it?.quantity ?? it?.qty) || 1
-      let price = toNum(it?.price)
-      if (!price || price <= 0) price = toNum(it?.offer ?? it?.final_price ?? it?.discounted_price ?? 0)
+    const orderIds = ordersQ.rows.map((r) => r.id)
 
-      const productQ = await client.query(
-        `SELECT id, name, brand, price, discounted_price, images
-         FROM products
-         WHERE id = $1`,
-        [product_id]
-      )
+    const itemsQ = await pool.query(
+      `
+      SELECT
+        i.order_id,
+        i.product_id,
+        i.product_name,
+        i.quantity,
+        i.price,
+        p.brand,
+        p.images
+      FROM order_items i
+      LEFT JOIN products p ON p.id = i.product_id
+      WHERE i.order_id = ANY($1::int[])
+      ORDER BY i.id ASC
+      `,
+      [orderIds]
+    )
 
-      if (!productQ.rowCount) {
-        await client.query('ROLLBACK')
-        return res.status(400).json({ message: `Invalid product_id (no such product): ${product_id}` })
-      }
+    const byOrder = new Map()
 
-      const p = productQ.rows[0]
-      const product_name = toText(it?.product_name ?? it?.name) || p.name || ''
-      const rowPrice = price > 0 ? price : toNum(p.discounted_price ?? p.price ?? 0)
+    for (const o of ordersQ.rows) {
+      byOrder.set(o.id, {
+        id: o.id,
+        user_id: o.user_id,
+        total_amount: safeNum(o.total_amount),
+        payment_status: o.payment_status || 'pending',
+        order_status: o.order_status || 'placed',
+        payment_method: o.payment_method || 'COD',
+        payment_ref: o.payment_ref || null,
+        created_at: o.created_at,
+        customer_name: o.customer_name || '',
+        customer_email: o.customer_email || '',
+        customer_mobile: o.customer_mobile || '',
+        shipping_address_line1: o.shipping_address_line1 || '',
+        shipping_address_line2: o.shipping_address_line2 || '',
+        shipping_city: o.shipping_city || '',
+        shipping_state: o.shipping_state || '',
+        shipping_pincode: o.shipping_pincode || '',
+        shipping_country: o.shipping_country || 'India',
+        items: []
+      })
+    }
+
+    for (const it of itemsQ.rows) {
+      const rec = byOrder.get(it.order_id)
+      if (!rec) continue
+      const images = it.images
       const image_url =
-        toText(it?.image_url) ||
-        (Array.isArray(p.images) && p.images.length ? String(p.images[0]) : '') ||
-        ''
+        (Array.isArray(images) && images.length ? String(images[0]) : '') || ''
 
-      await client.query(
-        `
-        INSERT INTO order_items (
-          order_id,
-          product_id,
-          product_name,
-          quantity,
-          price
-        )
-        VALUES ($1,$2,$3,$4,$5)
-        `,
-        [orderId, product_id, product_name, quantity, rowPrice]
-      )
-
-      await client.query(
-        `
-        INSERT INTO sales (order_id, total_amount)
-        VALUES ($1, $2)
-        ON CONFLICT DO NOTHING
-        `,
-        [orderId, total_amount]
-      )
+      rec.items.push({
+        product_id: it.product_id ? Number(it.product_id) : null,
+        product_name: it.product_name || '',
+        brand: it.brand || '',
+        qty: Number(it.quantity || 1),
+        price: safeNum(it.price),
+        mrp: safeNum(it.price),
+        size: '',
+        colour: '',
+        image_url
+      })
     }
 
-    if (uid) {
-      await client.query('DELETE FROM cart WHERE user_id = $1', [uid])
-    }
-
-    await client.query('COMMIT')
-    return res.status(201).json({ id: orderId, created_at: orderInsert.rows[0].created_at })
+    return res.json(Array.from(byOrder.values()))
   } catch (err) {
-    try {
-      await client.query('ROLLBACK')
-    } catch {}
     return res.status(500).json({ message: 'Server error', error: err.message })
-  } finally {
-    client.release()
+  }
+})
+
+router.get('/web/:id', async (req, res) => {
+  try {
+    const id = Number(req.params.id || 0)
+    if (!id) return res.status(400).json({ message: 'id required' })
+
+    const oQ = await pool.query(
+      `
+      SELECT
+        o.id,
+        o.user_id,
+        o.total_amount,
+        o.payment_status,
+        o.order_status,
+        o.payment_method,
+        o.created_at,
+        o.customer_name,
+        o.customer_email,
+        o.customer_mobile,
+        o.shipping_address_line1,
+        o.shipping_address_line2,
+        o.shipping_city,
+        o.shipping_state,
+        o.shipping_pincode,
+        o.shipping_country,
+        o.payment_ref
+      FROM orders o
+      WHERE o.id = $1
+      `,
+      [id]
+    )
+
+    if (!oQ.rowCount) return res.status(404).json({ message: 'Not found' })
+
+    const itemsQ = await pool.query(
+      `
+      SELECT
+        i.id,
+        i.order_id,
+        i.product_id,
+        i.product_name,
+        i.quantity,
+        i.price,
+        p.brand,
+        p.images
+      FROM order_items i
+      LEFT JOIN products p ON p.id = i.product_id
+      WHERE i.order_id = $1
+      ORDER BY i.id ASC
+      `,
+      [id]
+    )
+
+    const order = oQ.rows[0]
+
+    const items = itemsQ.rows.map((it) => {
+      const images = it.images
+      const image_url =
+        (Array.isArray(images) && images.length ? String(images[0]) : '') || ''
+
+      return {
+        product_id: it.product_id ? Number(it.product_id) : null,
+        product_name: it.product_name || '',
+        brand: it.brand || '',
+        qty: Number(it.quantity || 1),
+        price: safeNum(it.price),
+        mrp: safeNum(it.price),
+        size: '',
+        colour: '',
+        image_url
+      }
+    })
+
+    return res.json({
+      order: {
+        id: order.id,
+        user_id: order.user_id,
+        total_amount: safeNum(order.total_amount),
+        payment_status: order.payment_status || 'pending',
+        order_status: order.order_status || 'placed',
+        payment_method: order.payment_method || 'COD',
+        payment_ref: order.payment_ref || null,
+        created_at: order.created_at,
+        customer_name: order.customer_name || '',
+        customer_email: order.customer_email || '',
+        customer_mobile: order.customer_mobile || '',
+        shipping_address_line1: order.shipping_address_line1 || '',
+        shipping_address_line2: order.shipping_address_line2 || '',
+        shipping_city: order.shipping_city || '',
+        shipping_state: order.shipping_state || '',
+        shipping_pincode: order.shipping_pincode || '',
+        shipping_country: order.shipping_country || 'India'
+      },
+      items
+    })
+  } catch (err) {
+    return res.status(500).json({ message: 'Server error', error: err.message })
   }
 })
 
