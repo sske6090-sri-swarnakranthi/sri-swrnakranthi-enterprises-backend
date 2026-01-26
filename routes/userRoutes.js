@@ -21,21 +21,20 @@ router.post('/signup', async (req, res) => {
     if (!isValidMobile(mobile)) return res.status(400).json({ message: 'Valid mobile number is required' })
     if (!password || password.length < 6) return res.status(400).json({ message: 'Password must be at least 6 characters' })
 
-    const existing = await pool.query('SELECT id FROM gift_users WHERE lower(email) = $1 LIMIT 1', [email])
+    const existing = await pool.query('SELECT id FROM users WHERE lower(email) = $1 LIMIT 1', [email])
     if (existing.rowCount) return res.status(409).json({ message: 'Email already exists' })
 
     const hashed = await bcrypt.hash(password, 10)
 
     const inserted = await pool.query(
-      `INSERT INTO gift_users (name, email, mobile, password_hash, user_type)
-       VALUES ($1, $2, $3, $4, 'B2C')
-       RETURNING id, name, email, mobile, user_type, created_at, updated_at`,
+      `INSERT INTO users (name, email, mobile, password, type, created_at)
+       VALUES ($1, $2, $3, $4, 'B2C', NOW())
+       RETURNING id, name, email, mobile, type, created_at`,
       [name, email, mobile, hashed]
     )
 
     const user = inserted.rows[0]
-
-    const token = jwt.sign({ id: user.id, email: user.email, type: user.user_type }, JWT_SECRET, { expiresIn: '7d' })
+    const token = jwt.sign({ id: user.id, email: user.email, type: user.type }, JWT_SECRET, { expiresIn: '7d' })
 
     res.status(201).json({
       token,
@@ -44,7 +43,7 @@ router.post('/signup', async (req, res) => {
         name: user.name,
         email: user.email,
         mobile: user.mobile,
-        type: user.user_type
+        type: user.type
       }
     })
   } catch (e) {
@@ -60,16 +59,17 @@ router.post('/login', async (req, res) => {
     if (!isValidEmail(email)) return res.status(400).json({ message: 'Valid email is required' })
     if (!password) return res.status(400).json({ message: 'Password is required' })
 
-    const q = await pool.query('SELECT id, name, email, mobile, password_hash, user_type FROM gift_users WHERE lower(email) = $1 LIMIT 1', [email])
+    const q = await pool.query('SELECT id, name, email, mobile, password, type FROM users WHERE lower(email) = $1 LIMIT 1', [
+      email
+    ])
 
     if (!q.rowCount) return res.status(401).json({ message: 'Invalid credentials' })
 
     const u = q.rows[0]
-    const ok = await bcrypt.compare(password, u.password_hash)
-
+    const ok = await bcrypt.compare(password, u.password || '')
     if (!ok) return res.status(401).json({ message: 'Invalid credentials' })
 
-    const token = jwt.sign({ id: u.id, email: u.email, type: u.user_type }, JWT_SECRET, { expiresIn: '7d' })
+    const token = jwt.sign({ id: u.id, email: u.email, type: u.type || 'B2C' }, JWT_SECRET, { expiresIn: '7d' })
 
     res.json({
       token,
@@ -78,7 +78,7 @@ router.post('/login', async (req, res) => {
         name: u.name,
         email: u.email,
         mobile: u.mobile,
-        type: u.user_type
+        type: u.type || 'B2C'
       }
     })
   } catch (e) {
@@ -89,21 +89,18 @@ router.post('/login', async (req, res) => {
 router.get('/by-email/:email', async (req, res) => {
   try {
     const email = decodeURIComponent(req.params.email || '').trim().toLowerCase()
-    if (!email) return res.status(400).json({ message: 'Email is required' })
+    if (!isValidEmail(email)) return res.status(400).json({ message: 'Email is required' })
 
-    const q = await pool.query('SELECT id, name, email, mobile, user_type FROM gift_users WHERE lower(email) = $1 LIMIT 1', [email])
-
+    const q = await pool.query('SELECT id, name, email, mobile, type FROM users WHERE lower(email) = $1 LIMIT 1', [email])
     if (!q.rowCount) return res.status(404).json({ message: 'User not found' })
 
     const u = q.rows[0]
-    const mobile = isValidMobile(u.mobile) ? String(u.mobile) : ''
-
     res.json({
       id: u.id,
       name: u.name,
       email: u.email,
-      mobile,
-      type: u.user_type
+      mobile: isValidMobile(u.mobile) ? String(u.mobile) : '',
+      type: u.type || 'B2C'
     })
   } catch (e) {
     res.status(500).json({ message: 'Server error', error: e.message })
@@ -115,11 +112,11 @@ router.post('/update-mobile', async (req, res) => {
     const email = String(req.body?.email || '').trim().toLowerCase()
     const mobile = String(req.body?.mobile || '').trim()
 
-    if (!email) return res.status(400).json({ message: 'Email is required' })
+    if (!isValidEmail(email)) return res.status(400).json({ message: 'Email is required' })
     if (!isValidMobile(mobile)) return res.status(400).json({ message: 'Invalid mobile number' })
 
     const upd = await pool.query(
-      'UPDATE gift_users SET mobile = $1, updated_at = NOW() WHERE lower(email) = $2 RETURNING id, name, email, mobile, user_type, created_at, updated_at',
+      'UPDATE users SET mobile = $1 WHERE lower(email) = $2 RETURNING id, name, email, mobile, type, created_at',
       [mobile, email]
     )
 
@@ -130,10 +127,9 @@ router.post('/update-mobile', async (req, res) => {
       id: u.id,
       name: u.name,
       email: u.email,
-      mobile: String(u.mobile),
-      type: u.user_type,
-      created_at: u.created_at,
-      updated_at: u.updated_at
+      mobile: isValidMobile(u.mobile) ? String(u.mobile) : '',
+      type: u.type || 'B2C',
+      created_at: u.created_at
     })
   } catch (e) {
     res.status(500).json({ message: 'Server error', error: e.message })
@@ -143,10 +139,10 @@ router.post('/update-mobile', async (req, res) => {
 router.get('/b2c-customers', async (req, res) => {
   try {
     const q = await pool.query(
-      `SELECT id, name, email, mobile, user_type, created_at, updated_at
-       FROM gift_users
-       WHERE user_type = 'B2C'
-       ORDER BY updated_at DESC`
+      `SELECT id, name, email, mobile, type, created_at
+       FROM users
+       WHERE type = 'B2C'
+       ORDER BY created_at DESC`
     )
 
     const rows = q.rows.map((u) => ({
@@ -154,9 +150,8 @@ router.get('/b2c-customers', async (req, res) => {
       name: u.name,
       email: u.email,
       mobile: isValidMobile(u.mobile) ? String(u.mobile) : '',
-      type: u.user_type,
-      created_at: u.created_at,
-      updated_at: u.updated_at
+      type: u.type || 'B2C',
+      created_at: u.created_at
     }))
 
     res.json(rows)
@@ -168,10 +163,10 @@ router.get('/b2c-customers', async (req, res) => {
 router.get('/b2b-customers', async (req, res) => {
   try {
     const q = await pool.query(
-      `SELECT id, name, email, mobile, user_type, created_at, updated_at
-       FROM gift_users
-       WHERE user_type = 'B2B'
-       ORDER BY updated_at DESC`
+      `SELECT id, name, email, mobile, type, created_at
+       FROM users
+       WHERE type = 'B2B'
+       ORDER BY created_at DESC`
     )
 
     const rows = q.rows.map((u) => ({
@@ -179,9 +174,8 @@ router.get('/b2b-customers', async (req, res) => {
       name: u.name,
       email: u.email,
       mobile: isValidMobile(u.mobile) ? String(u.mobile) : '',
-      type: u.user_type,
-      created_at: u.created_at,
-      updated_at: u.updated_at
+      type: u.type || 'B2B',
+      created_at: u.created_at
     }))
 
     res.json(rows)
@@ -202,15 +196,15 @@ router.post('/b2b-customers', async (req, res) => {
     if (!isValidMobile(mobile)) return res.status(400).json({ message: 'Valid mobile number is required' })
     if (!password || password.length < 6) return res.status(400).json({ message: 'Password must be at least 6 characters' })
 
-    const existing = await pool.query('SELECT id FROM gift_users WHERE lower(email) = $1 LIMIT 1', [email])
+    const existing = await pool.query('SELECT id FROM users WHERE lower(email) = $1 LIMIT 1', [email])
     if (existing.rowCount) return res.status(409).json({ message: 'Email already exists' })
 
     const hashed = await bcrypt.hash(password, 10)
 
     const inserted = await pool.query(
-      `INSERT INTO gift_users (name, email, mobile, password_hash, user_type)
-       VALUES ($1, $2, $3, $4, 'B2B')
-       RETURNING id, name, email, mobile, user_type, created_at, updated_at`,
+      `INSERT INTO users (name, email, mobile, password, type, created_at)
+       VALUES ($1, $2, $3, $4, 'B2B', NOW())
+       RETURNING id, name, email, mobile, type, created_at`,
       [name, email, mobile, hashed]
     )
 
@@ -222,9 +216,8 @@ router.post('/b2b-customers', async (req, res) => {
         name: u.name,
         email: u.email,
         mobile: isValidMobile(u.mobile) ? String(u.mobile) : '',
-        type: u.user_type,
-        created_at: u.created_at,
-        updated_at: u.updated_at
+        type: u.type || 'B2B',
+        created_at: u.created_at
       }
     })
   } catch (e) {
