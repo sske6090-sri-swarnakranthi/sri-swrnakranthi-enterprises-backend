@@ -1,33 +1,43 @@
 const express = require('express')
 const multer = require('multer')
-const path = require('path')
-const fs = require('fs')
+const { v2: cloudinary } = require('cloudinary')
 
 const router = express.Router()
 
-const uploadDir = path.join(__dirname, '..', 'uploads')
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true })
-
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadDir)
-  },
-  filename: function (req, file, cb) {
-    const ext = (file.originalname.split('.').pop() || 'jpg').toLowerCase()
-    cb(null, `${Date.now()}-${Math.floor(Math.random() * 100000)}.${ext}`)
-  }
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+  secure: true
 })
 
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 }
 })
 
 router.post('/', upload.single('image'), async (req, res) => {
   if (!req.file) return res.status(400).json({ message: 'No file uploaded' })
-  const base = process.env.ASSETS_BASE || 'http://localhost:5000/uploads'
-  const imageUrl = `${base}/${req.file.filename}`
-  res.json({ imageUrl })
+
+  try {
+    const result = await new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        {
+          folder: 'uploads',
+          resource_type: 'image'
+        },
+        (err, uploaded) => {
+          if (err) return reject(err)
+          resolve(uploaded)
+        }
+      )
+      stream.end(req.file.buffer)
+    })
+
+    return res.json({ imageUrl: result.secure_url })
+  } catch (e) {
+    return res.status(500).json({ message: e?.message || 'Internal Server Error' })
+  }
 })
 
 module.exports = router
