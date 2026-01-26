@@ -4,7 +4,7 @@ const router = express.Router()
 
 const toNum = (v) => {
   const n = typeof v === 'number' ? v : parseFloat(String(v ?? '').trim())
-  return Number.isFinite(n) ? n : 0
+  return Number.isFinite(n) ? n : null
 }
 
 const toInt = (v) => {
@@ -25,6 +25,17 @@ const normalizeImages = (images) => {
   return []
 }
 
+const normalizeBool = (v, fallback = true) => {
+  if (typeof v === 'boolean') return v
+  if (typeof v === 'string') {
+    const s = v.trim().toLowerCase()
+    if (s === 'true') return true
+    if (s === 'false') return false
+  }
+  if (typeof v === 'number') return v === 1
+  return fallback
+}
+
 router.get('/', async (req, res) => {
   try {
     const limit = req.query.limit ? Math.max(1, toInt(req.query.limit)) : null
@@ -32,21 +43,18 @@ router.get('/', async (req, res) => {
     const sql = `
       SELECT
         id,
-        category,
+        name,
+        model_name,
         brand,
-        product_name,
-        b2b_actual_price,
-        b2b_discount,
-        b2b_final_price,
-        b2c_actual_price,
-        b2c_discount,
-        b2c_final_price,
-        count,
+        category_slug,
+        price,
+        discounted_price,
+        description,
         images,
-        created_at,
-        updated_at
-      FROM gift_products
-      ORDER BY updated_at DESC
+        published,
+        created_at
+      FROM products
+      ORDER BY created_at DESC
       ${limit ? 'LIMIT ' + limit : ''}
     `
 
@@ -65,20 +73,17 @@ router.get('/:id', async (req, res) => {
     const q = await pool.query(
       `SELECT
         id,
-        category,
+        name,
+        model_name,
         brand,
-        product_name,
-        b2b_actual_price,
-        b2b_discount,
-        b2b_final_price,
-        b2c_actual_price,
-        b2c_discount,
-        b2c_final_price,
-        count,
+        category_slug,
+        price,
+        discounted_price,
+        description,
         images,
-        created_at,
-        updated_at
-      FROM gift_products
+        published,
+        created_at
+      FROM products
       WHERE id = $1`,
       [id]
     )
@@ -92,53 +97,53 @@ router.get('/:id', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
-    const category = String(req.body?.category || '').trim()
-    const brand = String(req.body?.brand || '').trim()
-    const product_name = String(req.body?.product_name || '').trim()
+    const name = String(req.body?.name || '').trim()
+    const model_name_raw = req.body?.model_name
+    const model_name = model_name_raw === null ? null : String(model_name_raw || '').trim() || null
 
-    const b2b_actual_price = toNum(req.body?.b2b_actual_price)
-    const b2b_discount = toNum(req.body?.b2b_discount)
-    const b2b_final_price = toNum(req.body?.b2b_final_price)
+    const brand_raw = req.body?.brand
+    const brand = brand_raw === null ? null : String(brand_raw || '').trim() || null
 
-    const b2c_actual_price = toNum(req.body?.b2c_actual_price)
-    const b2c_discount = toNum(req.body?.b2c_discount)
-    const b2c_final_price = toNum(req.body?.b2c_final_price)
+    const category_slug_raw = req.body?.category_slug
+    const category_slug = category_slug_raw === null ? null : String(category_slug_raw || '').trim() || null
 
-    const count = Math.max(0, toInt(req.body?.count || 0))
+    const price = toNum(req.body?.price)
+    const discounted_price = req.body?.discounted_price === null || req.body?.discounted_price === undefined ? null : toNum(req.body?.discounted_price)
+
+    const description_raw = req.body?.description
+    const description = description_raw === null ? null : String(description_raw || '').trim() || null
+
     const images = normalizeImages(req.body?.images)
+    const published = normalizeBool(req.body?.published, true)
 
-    if (!category || !brand || !product_name) {
+    if (!name || price === null || price <= 0) {
       return res.status(400).json({ message: 'Missing product fields' })
     }
 
     const q = await pool.query(
-      `INSERT INTO gift_products (
-        category,
+      `INSERT INTO products (
+        name,
+        model_name,
         brand,
-        product_name,
-        b2b_actual_price,
-        b2b_discount,
-        b2b_final_price,
-        b2c_actual_price,
-        b2c_discount,
-        b2c_final_price,
-        count,
-        images
+        category_slug,
+        price,
+        discounted_price,
+        description,
+        images,
+        published
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
       RETURNING *`,
       [
-        category,
+        name,
+        model_name,
         brand,
-        product_name,
-        b2b_actual_price,
-        b2b_discount,
-        b2b_final_price,
-        b2c_actual_price,
-        b2c_discount,
-        b2c_final_price,
-        count,
-        JSON.stringify(images)
+        category_slug,
+        price,
+        discounted_price,
+        description,
+        images,
+        published
       ]
     )
 
@@ -153,54 +158,53 @@ router.put('/:id', async (req, res) => {
     const id = toInt(req.params.id)
     if (!id || id < 1) return res.status(400).json({ message: 'Invalid product id' })
 
-    const category = String(req.body?.category || '').trim()
-    const brand = String(req.body?.brand || '').trim()
-    const product_name = String(req.body?.product_name || '').trim()
+    const name = String(req.body?.name || '').trim()
+    const model_name_raw = req.body?.model_name
+    const model_name = model_name_raw === null ? null : String(model_name_raw || '').trim() || null
 
-    const b2b_actual_price = toNum(req.body?.b2b_actual_price)
-    const b2b_discount = toNum(req.body?.b2b_discount)
-    const b2b_final_price = toNum(req.body?.b2b_final_price)
+    const brand_raw = req.body?.brand
+    const brand = brand_raw === null ? null : String(brand_raw || '').trim() || null
 
-    const b2c_actual_price = toNum(req.body?.b2c_actual_price)
-    const b2c_discount = toNum(req.body?.b2c_discount)
-    const b2c_final_price = toNum(req.body?.b2c_final_price)
+    const category_slug_raw = req.body?.category_slug
+    const category_slug = category_slug_raw === null ? null : String(category_slug_raw || '').trim() || null
 
-    const count = Math.max(0, toInt(req.body?.count || 0))
+    const price = toNum(req.body?.price)
+    const discounted_price = req.body?.discounted_price === null || req.body?.discounted_price === undefined ? null : toNum(req.body?.discounted_price)
+
+    const description_raw = req.body?.description
+    const description = description_raw === null ? null : String(description_raw || '').trim() || null
+
     const images = normalizeImages(req.body?.images)
+    const published = normalizeBool(req.body?.published, true)
 
-    if (!category || !brand || !product_name) {
+    if (!name || price === null || price <= 0) {
       return res.status(400).json({ message: 'Missing product fields' })
     }
 
     const q = await pool.query(
-      `UPDATE gift_products
+      `UPDATE products
        SET
-        category = $1,
-        brand = $2,
-        product_name = $3,
-        b2b_actual_price = $4,
-        b2b_discount = $5,
-        b2b_final_price = $6,
-        b2c_actual_price = $7,
-        b2c_discount = $8,
-        b2c_final_price = $9,
-        count = $10,
-        images = $11::jsonb,
-        updated_at = NOW()
-       WHERE id = $12
+        name = $1,
+        model_name = $2,
+        brand = $3,
+        category_slug = $4,
+        price = $5,
+        discounted_price = $6,
+        description = $7,
+        images = $8,
+        published = $9
+       WHERE id = $10
        RETURNING *`,
       [
-        category,
+        name,
+        model_name,
         brand,
-        product_name,
-        b2b_actual_price,
-        b2b_discount,
-        b2b_final_price,
-        b2c_actual_price,
-        b2c_discount,
-        b2c_final_price,
-        count,
-        JSON.stringify(images),
+        category_slug,
+        price,
+        discounted_price,
+        description,
+        images,
+        published,
         id
       ]
     )
@@ -217,7 +221,7 @@ router.delete('/:id', async (req, res) => {
     const id = toInt(req.params.id)
     if (!id || id < 1) return res.status(400).json({ message: 'Invalid product id' })
 
-    const q = await pool.query('DELETE FROM gift_products WHERE id = $1 RETURNING id', [id])
+    const q = await pool.query('DELETE FROM products WHERE id = $1 RETURNING id', [id])
     if (!q.rowCount) return res.status(404).json({ message: 'Product not found' })
 
     res.json({ message: 'Deleted', id: q.rows[0].id })
