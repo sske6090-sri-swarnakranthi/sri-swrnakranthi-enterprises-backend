@@ -3,14 +3,117 @@ const pool = require('../db')
 
 const toText = (v) => {
   if (v === undefined || v === null) return ''
-  const s = String(v).trim()
-  return s
+  return String(v).trim()
 }
 
 const safeNum = (v) => {
   const n = Number(v)
   return Number.isFinite(n) ? n : 0
 }
+
+router.get('/web/admin', async (req, res) => {
+  try {
+    const limitRaw = Number(req.query.limit ?? 200)
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 1000) : 200
+
+    const ordersQ = await pool.query(
+      `
+      SELECT
+        o.id,
+        o.user_id,
+        o.total_amount,
+        o.payment_status,
+        o.order_status,
+        o.payment_method,
+        o.created_at,
+        o.customer_name,
+        o.customer_email,
+        o.customer_mobile,
+        o.shipping_address_line1,
+        o.shipping_address_line2,
+        o.shipping_city,
+        o.shipping_state,
+        o.shipping_pincode,
+        o.shipping_country,
+        o.payment_ref
+      FROM orders o
+      ORDER BY o.created_at DESC NULLS LAST, o.id DESC
+      LIMIT $1
+      `,
+      [limit]
+    )
+
+    if (!ordersQ.rowCount) return res.json([])
+
+    const orderIds = ordersQ.rows.map((r) => r.id)
+
+    const itemsQ = await pool.query(
+      `
+      SELECT
+        i.id,
+        i.order_id,
+        i.product_id,
+        i.product_name,
+        i.quantity,
+        i.price,
+        p.brand,
+        p.images
+      FROM order_items i
+      LEFT JOIN products p ON p.id = i.product_id
+      WHERE i.order_id = ANY($1::int[])
+      ORDER BY i.id ASC
+      `,
+      [orderIds]
+    )
+
+    const byOrder = new Map()
+
+    for (const o of ordersQ.rows) {
+      byOrder.set(o.id, {
+        id: o.id,
+        user_id: o.user_id,
+        total_amount: safeNum(o.total_amount),
+        payment_status: o.payment_status || 'pending',
+        order_status: o.order_status || 'placed',
+        payment_method: o.payment_method || 'COD',
+        payment_ref: o.payment_ref || null,
+        created_at: o.created_at,
+        customer_name: o.customer_name || '',
+        customer_email: o.customer_email || '',
+        customer_mobile: o.customer_mobile || '',
+        shipping_address_line1: o.shipping_address_line1 || '',
+        shipping_address_line2: o.shipping_address_line2 || '',
+        shipping_city: o.shipping_city || '',
+        shipping_state: o.shipping_state || '',
+        shipping_pincode: o.shipping_pincode || '',
+        shipping_country: o.shipping_country || 'India',
+        items: []
+      })
+    }
+
+    for (const it of itemsQ.rows) {
+      const rec = byOrder.get(it.order_id)
+      if (!rec) continue
+      const images = it.images
+      const image_url = (Array.isArray(images) && images.length ? String(images[0]) : '') || ''
+      rec.items.push({
+        product_id: it.product_id ? Number(it.product_id) : null,
+        product_name: it.product_name || '',
+        brand: it.brand || '',
+        qty: Number(it.quantity || 1),
+        price: safeNum(it.price),
+        mrp: safeNum(it.price),
+        size: '',
+        colour: '',
+        image_url
+      })
+    }
+
+    return res.json(Array.from(byOrder.values()))
+  } catch (err) {
+    return res.status(500).json({ message: 'Server error', error: err.message })
+  }
+})
 
 router.get('/web/by-user', async (req, res) => {
   try {
@@ -113,9 +216,7 @@ router.get('/web/by-user', async (req, res) => {
       const rec = byOrder.get(it.order_id)
       if (!rec) continue
       const images = it.images
-      const image_url =
-        (Array.isArray(images) && images.length ? String(images[0]) : '') || ''
-
+      const image_url = (Array.isArray(images) && images.length ? String(images[0]) : '') || ''
       rec.items.push({
         product_id: it.product_id ? Number(it.product_id) : null,
         product_name: it.product_name || '',
@@ -191,9 +292,7 @@ router.get('/web/:id', async (req, res) => {
 
     const items = itemsQ.rows.map((it) => {
       const images = it.images
-      const image_url =
-        (Array.isArray(images) && images.length ? String(images[0]) : '') || ''
-
+      const image_url = (Array.isArray(images) && images.length ? String(images[0]) : '') || ''
       return {
         product_id: it.product_id ? Number(it.product_id) : null,
         product_name: it.product_name || '',
