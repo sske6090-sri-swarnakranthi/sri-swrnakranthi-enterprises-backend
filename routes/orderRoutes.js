@@ -122,17 +122,48 @@ router.get('/web/by-user', async (req, res) => {
 
     if (!email && !mobile) return res.status(400).json({ message: 'email or mobile required' })
 
-    const params = []
-    const ors = []
+    const userParams = []
+    const userWheres = []
 
     if (email) {
-      params.push(email)
-      ors.push(`LOWER(o.customer_email) = $${params.length}`)
+      userParams.push(email)
+      userWheres.push(`LOWER(u.email) = $${userParams.length}`)
     }
 
     if (mobile) {
-      params.push(mobile)
-      ors.push(`regexp_replace(o.customer_mobile,'\\D','','g') = $${params.length}`)
+      userParams.push(mobile)
+      userWheres.push(`regexp_replace(COALESCE(u.mobile,''),'\\D','','g') = $${userParams.length}`)
+    }
+
+    const userWhereSql = userWheres.length ? `WHERE (${userWheres.join(' OR ')})` : ''
+
+    const usersQ = await pool.query(
+      `
+      SELECT u.id
+      FROM users u
+      ${userWhereSql}
+      `,
+      userParams
+    )
+
+    const userIds = usersQ.rows.map((r) => Number(r.id)).filter((n) => Number.isFinite(n) && n > 0)
+
+    const orderParams = []
+    const ors = []
+
+    if (userIds.length) {
+      orderParams.push(userIds)
+      ors.push(`o.user_id = ANY($${orderParams.length}::int[])`)
+    }
+
+    if (email) {
+      orderParams.push(email)
+      ors.push(`LOWER(COALESCE(o.customer_email,'')) = $${orderParams.length}`)
+    }
+
+    if (mobile) {
+      orderParams.push(mobile)
+      ors.push(`regexp_replace(COALESCE(o.customer_mobile,''),'\\D','','g') = $${orderParams.length}`)
     }
 
     const whereSql = ors.length ? `WHERE (${ors.join(' OR ')})` : ''
@@ -162,7 +193,7 @@ router.get('/web/by-user', async (req, res) => {
       ORDER BY o.created_at DESC NULLS LAST, o.id DESC
       LIMIT 200
       `,
-      params
+      orderParams
     )
 
     if (!ordersQ.rowCount) return res.json([])
