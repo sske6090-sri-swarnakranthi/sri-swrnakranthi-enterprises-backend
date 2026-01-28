@@ -14,8 +14,10 @@ const defaultOrigins = [
   'http://127.0.0.1:3001',
   'http://localhost:3002',
   'http://127.0.0.1:3002',
-  'swarnakranthi.com',
   'https://swarnakranthi.com',
+  'https://www.swarnakranthi.com',
+  'http://swarnakranthi.com',
+  'http://www.swarnakranthi.com', 
   'https://sri-swrnakranthi-enterprises-websit.vercel.app',
   'https://sri-swrnakranthi-enterprises-admin.vercel.app'
 ]
