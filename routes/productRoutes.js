@@ -63,6 +63,11 @@ const uploadBufferToCloudinary = (buffer) =>
     stream.end(buffer)
   })
 
+const isImagePath = (p) => {
+  const s = String(p || '').trim().toLowerCase()
+  return s.endsWith('.jpg') || s.endsWith('.jpeg') || s.endsWith('.png') || s.endsWith('.webp') || s.endsWith('.jfif')
+}
+
 router.get('/', async (req, res) => {
   try {
     const limit = req.query.limit ? Math.max(1, toInt(req.query.limit)) : null
@@ -206,17 +211,18 @@ router.post('/upload-zip', zipUpload.single('zip'), async (req, res) => {
     }
 
     const zip = await unzipper.Open.buffer(req.file.buffer)
-    const files = (zip.files || []).filter((f) => !f.path.endsWith('/') && !f.type)
-    const imageFiles = files.filter((f) => {
-      const p = String(f.path || '').toLowerCase()
-      return p.endsWith('.jpg') || p.endsWith('.jpeg') || p.endsWith('.png') || p.endsWith('.webp')
+
+    const candidates = (zip.files || []).filter((f) => {
+      const p = String(f.path || '')
+      return p && !p.endsWith('/') && isImagePath(p)
     })
 
-    if (!imageFiles.length) return res.status(400).json({ message: 'No images found in zip' })
+    if (!candidates.length) return res.status(400).json({ message: 'No images found in zip' })
 
     const imageUrls = []
-    for (const f of imageFiles) {
+    for (const f of candidates) {
       const buf = await f.buffer()
+      if (!buf || !buf.length) continue
       const up = await uploadBufferToCloudinary(buf)
       if (up?.secure_url) imageUrls.push(up.secure_url)
     }
