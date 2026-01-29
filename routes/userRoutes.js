@@ -1,163 +1,89 @@
 const express = require('express')
 const pool = require('../db')
 const bcrypt = require('bcryptjs')
-const admin = require('firebase-admin')
+const jwt = require('jsonwebtoken')
 const router = express.Router()
+
+const JWT_SECRET = process.env.JWT_SECRET || 'change-me'
 
 const isValidEmail = (v) => /^\S+@\S+\.\S+$/.test(String(v || '').trim())
 const isValidMobile = (v) => /^[6-9]\d{9}$/.test(String(v || '').trim())
 
-if (!admin.apps.length) {
-  const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON
-  if (!raw) throw new Error('FIREBASE_SERVICE_ACCOUNT_JSON is missing')
-  const serviceAccount = JSON.parse(raw)
-  admin.initializeApp({ credential: admin.credential.cert(serviceAccount) })
-}
-
-async function verifyFirebase(req, res, next) {
+router.post('/signup', async (req, res) => {
   try {
-    const h = String(req.headers.authorization || '')
-    const token = h.startsWith('Bearer ') ? h.slice(7) : ''
-    if (!token) return res.status(401).json({ message: 'Missing token' })
-    const decoded = await admin.auth().verifyIdToken(token)
-    req.firebaseUser = decoded
-    req.firebaseToken = token
-    next()
-  } catch {
-    return res.status(401).json({ message: 'Invalid token' })
-  }
-}
-
-router.get('/me', verifyFirebase, async (req, res) => {
-  try {
-    const email = String(req.firebaseUser?.email || '').trim().toLowerCase()
-    const uid = String(req.firebaseUser?.uid || '').trim()
-    if (!email || !isValidEmail(email) || !uid) return res.status(400).json({ message: 'Invalid user' })
-
-    const q = await pool.query(
-      `SELECT id, name, email, mobile, type, firebase_uid, created_at
-       FROM users
-       WHERE firebase_uid = $1 OR lower(email) = $2
-       ORDER BY created_at DESC
-       LIMIT 1`,
-      [uid, email]
-    )
-
-    if (!q.rowCount) return res.status(404).json({ message: 'User not found. Please signup.' })
-
-    return res.json({
-      user: {
-        id: q.rows[0].id,
-        name: q.rows[0].name,
-        email: q.rows[0].email,
-        mobile: isValidMobile(q.rows[0].mobile) ? String(q.rows[0].mobile) : '',
-        type: q.rows[0].type || 'B2C',
-        firebase_uid: q.rows[0].firebase_uid,
-        created_at: q.rows[0].created_at
-      }
-    })
-  } catch (e) {
-    return res.status(500).json({ message: 'Server error', error: e.message })
-  }
-})
-
-router.post('/firebase-sync', verifyFirebase, async (req, res) => {
-  try {
-    const uid = String(req.firebaseUser?.uid || '').trim()
-    const email = String(req.body?.email || req.firebaseUser?.email || '').trim().toLowerCase()
-    const name = String(req.body?.name || req.firebaseUser?.name || '').trim()
+    const name = String(req.body?.name || '').trim()
+    const email = String(req.body?.email || '').trim().toLowerCase()
     const mobile = String(req.body?.mobile || '').trim()
-    const type = String(req.body?.type || 'B2C').trim().toUpperCase() === 'B2B' ? 'B2B' : 'B2C'
+    const password = String(req.body?.password || '')
 
-    if (!uid) return res.status(400).json({ message: 'Invalid user' })
+    if (!name) return res.status(400).json({ message: 'Name is required' })
     if (!isValidEmail(email)) return res.status(400).json({ message: 'Valid email is required' })
-    if (mobile && !isValidMobile(mobile)) return res.status(400).json({ message: 'Valid mobile number is required' })
+    if (!isValidMobile(mobile)) return res.status(400).json({ message: 'Valid mobile number is required' })
+    if (!password || password.length < 6) return res.status(400).json({ message: 'Password must be at least 6 characters' })
 
     const existing = await pool.query('SELECT id FROM users WHERE lower(email) = $1 LIMIT 1', [email])
+    if (existing.rowCount) return res.status(409).json({ message: 'Email already exists' })
 
-    if (existing.rowCount) {
-      const upd = await pool.query(
-        `UPDATE users
-         SET name = COALESCE(NULLIF($1, ''), name),
-             mobile = COALESCE(NULLIF($2, ''), mobile),
-             type = COALESCE(NULLIF($3, ''), type),
-             firebase_uid = COALESCE(NULLIF($4, ''), firebase_uid)
-         WHERE lower(email) = $5
-         RETURNING id, name, email, mobile, type, firebase_uid, created_at`,
-        [name, mobile, type, uid, email]
-      )
-
-      return res.json({
-        user: {
-          id: upd.rows[0].id,
-          name: upd.rows[0].name,
-          email: upd.rows[0].email,
-          mobile: isValidMobile(upd.rows[0].mobile) ? String(upd.rows[0].mobile) : '',
-          type: upd.rows[0].type || 'B2C',
-          firebase_uid: upd.rows[0].firebase_uid,
-          created_at: upd.rows[0].created_at
-        }
-      })
-    }
-
-    const randomPwd = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)
-    const hashed = await bcrypt.hash(randomPwd, 10)
+    const hashed = await bcrypt.hash(password, 10)
 
     const inserted = await pool.query(
-      `INSERT INTO users (name, email, mobile, password, type, created_at, firebase_uid)
-       VALUES ($1, $2, $3, $4, $5, NOW(), $6)
-       RETURNING id, name, email, mobile, type, firebase_uid, created_at`,
-      [name || email, email, mobile || '', hashed, type, uid]
+      `INSERT INTO users (name, email, mobile, password, type, created_at)
+       VALUES ($1, $2, $3, $4, 'B2C', NOW())
+       RETURNING id, name, email, mobile, type, created_at`,
+      [name, email, mobile, hashed]
     )
 
-    return res.status(201).json({
+    const user = inserted.rows[0]
+    const token = jwt.sign({ id: user.id, email: user.email, type: user.type }, JWT_SECRET, { expiresIn: '7d' })
+
+    res.status(201).json({
+      token,
       user: {
-        id: inserted.rows[0].id,
-        name: inserted.rows[0].name,
-        email: inserted.rows[0].email,
-        mobile: isValidMobile(inserted.rows[0].mobile) ? String(inserted.rows[0].mobile) : '',
-        type: inserted.rows[0].type || 'B2C',
-        firebase_uid: inserted.rows[0].firebase_uid,
-        created_at: inserted.rows[0].created_at
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        mobile: user.mobile,
+        type: user.type
       }
     })
   } catch (e) {
-    return res.status(500).json({ message: 'Server error', error: e.message })
+    res.status(500).json({ message: 'Server error', error: e.message })
   }
 })
 
-router.post('/update-mobile', verifyFirebase, async (req, res) => {
+router.post('/login', async (req, res) => {
   try {
-    const email = String(req.body?.email || req.firebaseUser?.email || '').trim().toLowerCase()
-    const mobile = String(req.body?.mobile || '').trim()
+    const email = String(req.body?.email || '').trim().toLowerCase()
+    const password = String(req.body?.password || '')
 
-    if (!isValidEmail(email)) return res.status(400).json({ message: 'Email is required' })
-    if (!isValidMobile(mobile)) return res.status(400).json({ message: 'Invalid mobile number' })
+    if (!isValidEmail(email)) return res.status(400).json({ message: 'Valid email is required' })
+    if (!password) return res.status(400).json({ message: 'Password is required' })
 
-    const upd = await pool.query(
-      `UPDATE users
-       SET mobile = $1
-       WHERE lower(email) = $2
-       RETURNING id, name, email, mobile, type, firebase_uid, created_at`,
-      [mobile, email]
+    const q = await pool.query(
+      'SELECT id, name, email, mobile, password, type FROM users WHERE lower(email) = $1 LIMIT 1',
+      [email]
     )
 
-    if (!upd.rowCount) return res.status(404).json({ message: 'User not found' })
+    if (!q.rowCount) return res.status(401).json({ message: 'Invalid credentials' })
 
-    const u = upd.rows[0]
-    return res.json({
+    const u = q.rows[0]
+    const ok = await bcrypt.compare(password, u.password || '')
+    if (!ok) return res.status(401).json({ message: 'Invalid credentials' })
+
+    const token = jwt.sign({ id: u.id, email: u.email, type: u.type || 'B2C' }, JWT_SECRET, { expiresIn: '7d' })
+
+    res.json({
+      token,
       user: {
         id: u.id,
         name: u.name,
         email: u.email,
-        mobile: isValidMobile(u.mobile) ? String(u.mobile) : '',
-        type: u.type || 'B2C',
-        firebase_uid: u.firebase_uid,
-        created_at: u.created_at
+        mobile: u.mobile,
+        type: u.type || 'B2C'
       }
     })
   } catch (e) {
-    return res.status(500).json({ message: 'Server error', error: e.message })
+    res.status(500).json({ message: 'Server error', error: e.message })
   }
 })
 
@@ -166,24 +92,48 @@ router.get('/by-email/:email', async (req, res) => {
     const email = decodeURIComponent(req.params.email || '').trim().toLowerCase()
     if (!isValidEmail(email)) return res.status(400).json({ message: 'Email is required' })
 
-    const q = await pool.query(
-      'SELECT id, name, email, mobile, type, firebase_uid, created_at FROM users WHERE lower(email) = $1 LIMIT 1',
-      [email]
-    )
+    const q = await pool.query('SELECT id, name, email, mobile, type FROM users WHERE lower(email) = $1 LIMIT 1', [email])
     if (!q.rowCount) return res.status(404).json({ message: 'User not found' })
 
     const u = q.rows[0]
-    return res.json({
+    res.json({
+      id: u.id,
+      name: u.name,
+      email: u.email,
+      mobile: isValidMobile(u.mobile) ? String(u.mobile) : '',
+      type: u.type || 'B2C'
+    })
+  } catch (e) {
+    res.status(500).json({ message: 'Server error', error: e.message })
+  }
+})
+
+router.post('/update-mobile', async (req, res) => {
+  try {
+    const email = String(req.body?.email || '').trim().toLowerCase()
+    const mobile = String(req.body?.mobile || '').trim()
+
+    if (!isValidEmail(email)) return res.status(400).json({ message: 'Email is required' })
+    if (!isValidMobile(mobile)) return res.status(400).json({ message: 'Invalid mobile number' })
+
+    const upd = await pool.query(
+      'UPDATE users SET mobile = $1 WHERE lower(email) = $2 RETURNING id, name, email, mobile, type, created_at',
+      [mobile, email]
+    )
+
+    if (!upd.rowCount) return res.status(404).json({ message: 'User not found' })
+
+    const u = upd.rows[0]
+    res.json({
       id: u.id,
       name: u.name,
       email: u.email,
       mobile: isValidMobile(u.mobile) ? String(u.mobile) : '',
       type: u.type || 'B2C',
-      firebase_uid: u.firebase_uid,
       created_at: u.created_at
     })
   } catch (e) {
-    return res.status(500).json({ message: 'Server error', error: e.message })
+    res.status(500).json({ message: 'Server error', error: e.message })
   }
 })
 
@@ -205,9 +155,9 @@ router.get('/b2c-customers', async (req, res) => {
       created_at: u.created_at
     }))
 
-    return res.json(rows)
+    res.json(rows)
   } catch (e) {
-    return res.status(500).json({ message: 'Server error', error: e.message })
+    res.status(500).json({ message: 'Server error', error: e.message })
   }
 })
 
@@ -229,9 +179,9 @@ router.get('/b2b-customers', async (req, res) => {
       created_at: u.created_at
     }))
 
-    return res.json(rows)
+    res.json(rows)
   } catch (e) {
-    return res.status(500).json({ message: 'Server error', error: e.message })
+    res.status(500).json({ message: 'Server error', error: e.message })
   }
 })
 
@@ -253,14 +203,15 @@ router.post('/b2b-customers', async (req, res) => {
     const hashed = await bcrypt.hash(password, 10)
 
     const inserted = await pool.query(
-      `INSERT INTO users (name, email, mobile, password, type, created_at, firebase_uid)
-       VALUES ($1, $2, $3, $4, 'B2B', NOW(), NULL)
+      `INSERT INTO users (name, email, mobile, password, type, created_at)
+       VALUES ($1, $2, $3, $4, 'B2B', NOW())
        RETURNING id, name, email, mobile, type, created_at`,
       [name, email, mobile, hashed]
     )
 
     const u = inserted.rows[0]
-    return res.status(201).json({
+
+    res.status(201).json({
       user: {
         id: u.id,
         name: u.name,
@@ -271,7 +222,7 @@ router.post('/b2b-customers', async (req, res) => {
       }
     })
   } catch (e) {
-    return res.status(500).json({ message: 'Server error', error: e.message })
+    res.status(500).json({ message: 'Server error', error: e.message })
   }
 })
 
