@@ -110,7 +110,7 @@ router.delete('/', async (req, res) => {
 
     const variant = image_url
 
-    const q = await pool.query(
+    let q = await pool.query(
       `
       DELETE FROM wishlist
       WHERE user_id = $1 AND product_id = $2 AND COALESCE(variant, '') = $3
@@ -119,11 +119,23 @@ router.delete('/', async (req, res) => {
       [user_id, product_id, variant]
     )
 
+    if (!q.rowCount) {
+      q = await pool.query(
+        `
+        DELETE FROM wishlist
+        WHERE user_id = $1 AND product_id = $2
+        RETURNING user_id, product_id, variant
+        `,
+        [user_id, product_id]
+      )
+    }
+
     if (!q.rowCount) return res.status(404).json({ message: 'Not found' })
     res.json({ message: 'Removed' })
   } catch (e) {
     res.status(500).json({ message: 'Error removing wishlist', error: e.message })
   }
 })
+
 
 module.exports = router
