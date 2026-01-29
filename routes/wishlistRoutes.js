@@ -21,6 +21,7 @@ router.get('/:userId', async (req, res) => {
         w.user_id,
         w.product_id,
         COALESCE(w.variant, '') AS variant,
+        w.created_at AS wished_at,
         p.id,
         p.name,
         p.model_name,
@@ -29,9 +30,9 @@ router.get('/:userId', async (req, res) => {
         p.price,
         p.discounted_price,
         p.description,
+        p.images,
         p.published,
-        p.created_at,
-        p.images
+        p.created_at
       FROM wishlist w
       JOIN products p ON p.id = w.product_id
       WHERE w.user_id = $1
@@ -41,9 +42,9 @@ router.get('/:userId', async (req, res) => {
     )
 
     const rows = (q.rows || []).map((r) => {
-      const images = Array.isArray(r.images) ? r.images.filter(Boolean).map(String) : []
+      const imgs = Array.isArray(r.images) ? r.images.filter(Boolean).map(String) : []
       const picked = String(r.variant || '')
-      const image_url = picked || (images[0] || '')
+      const finalImg = picked || (imgs.length ? imgs[0] : '')
       return {
         user_id: r.user_id,
         id: r.product_id,
@@ -58,8 +59,9 @@ router.get('/:userId', async (req, res) => {
         description: r.description,
         published: r.published,
         created_at: r.created_at,
-        image_url,
-        images
+        image_url: finalImg,
+        images: finalImg ? [finalImg] : imgs,
+        wished_at: r.wished_at
       }
     })
 
@@ -73,9 +75,9 @@ router.post('/', async (req, res) => {
   try {
     const user_id = toInt(req.body?.user_id)
     const product_id = toInt(req.body?.product_id)
-    const variant = toStr(req.body?.variant || req.body?.image_url)
+    const variant = toStr(req.body?.variant)
 
-    if (!user_id || user_id < 1 || !product_id || product_id < 1 || !variant) {
+    if (!user_id || user_id < 1 || !product_id || product_id < 1) {
       return res.status(400).json({ message: 'Missing fields' })
     }
 
@@ -98,9 +100,9 @@ router.delete('/', async (req, res) => {
   try {
     const user_id = toInt(req.body?.user_id)
     const product_id = toInt(req.body?.product_id)
-    const variant = toStr(req.body?.variant || req.body?.image_url)
+    const variant = toStr(req.body?.variant)
 
-    if (!user_id || user_id < 1 || !product_id || product_id < 1 || !variant) {
+    if (!user_id || user_id < 1 || !product_id || product_id < 1) {
       return res.status(400).json({ message: 'Missing fields' })
     }
 
