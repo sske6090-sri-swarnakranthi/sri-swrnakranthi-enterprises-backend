@@ -8,19 +8,18 @@ const toInt = (v) => {
   return Number.isInteger(n) ? n : parseInt(String(v ?? '').trim(), 10)
 }
 
-const toStr = (v) => (v === null || v === undefined ? '' : String(v).trim())
-
 router.get('/:userId', async (req, res) => {
   try {
-    const userId = toStr(req.params.userId)
-    if (!userId) return res.status(400).json({ message: 'Invalid user id' })
+    const userId = toInt(req.params.userId)
+    if (!userId || userId < 1) return res.status(400).json({ message: 'Invalid user id' })
 
     const q = await pool.query(
       `
       SELECT
         w.user_id,
         w.product_id,
-        w.image_url,
+        w.variant,
+        w.created_at AS wish_created_at,
         p.id,
         p.name,
         p.model_name,
@@ -29,6 +28,7 @@ router.get('/:userId', async (req, res) => {
         p.price,
         p.discounted_price,
         p.description,
+        p.images,
         p.published,
         p.created_at
       FROM wishlist w
@@ -43,6 +43,7 @@ router.get('/:userId', async (req, res) => {
       user_id: r.user_id,
       id: r.product_id,
       product_id: r.product_id,
+      variant: r.variant || '',
       name: r.name,
       model_name: r.model_name,
       brand: r.brand,
@@ -52,8 +53,7 @@ router.get('/:userId', async (req, res) => {
       description: r.description,
       published: r.published,
       created_at: r.created_at,
-      image_url: r.image_url || '',
-      images: r.image_url ? [r.image_url] : []
+      images: Array.isArray(r.images) ? r.images : []
     }))
 
     res.json(rows)
@@ -64,21 +64,21 @@ router.get('/:userId', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
-    const user_id = toStr(req.body?.user_id)
+    const user_id = toInt(req.body?.user_id)
     const product_id = toInt(req.body?.product_id)
-    const image_url = toStr(req.body?.image_url)
+    const variant = String(req.body?.variant || '').trim()
 
-    if (!user_id || !product_id || product_id < 1 || !image_url) {
+    if (!user_id || user_id < 1 || !product_id || product_id < 1) {
       return res.status(400).json({ message: 'Missing fields' })
     }
 
     await pool.query(
       `
-      INSERT INTO wishlist (user_id, product_id, image_url)
+      INSERT INTO wishlist (user_id, product_id, variant)
       VALUES ($1, $2, $3)
-      ON CONFLICT (user_id, product_id, image_url) DO NOTHING
+      ON CONFLICT (user_id, product_id) DO NOTHING
       `,
-      [user_id, product_id, image_url]
+      [user_id, product_id, variant || null]
     )
 
     res.status(201).json({ message: 'Added' })
@@ -89,21 +89,20 @@ router.post('/', async (req, res) => {
 
 router.delete('/', async (req, res) => {
   try {
-    const user_id = toStr(req.body?.user_id)
+    const user_id = toInt(req.body?.user_id)
     const product_id = toInt(req.body?.product_id)
-    const image_url = toStr(req.body?.image_url)
 
-    if (!user_id || !product_id || product_id < 1 || !image_url) {
+    if (!user_id || user_id < 1 || !product_id || product_id < 1) {
       return res.status(400).json({ message: 'Missing fields' })
     }
 
     const q = await pool.query(
       `
       DELETE FROM wishlist
-      WHERE user_id = $1 AND product_id = $2 AND image_url = $3
-      RETURNING user_id, product_id, image_url
+      WHERE user_id = $1 AND product_id = $2
+      RETURNING user_id, product_id
       `,
-      [user_id, product_id, image_url]
+      [user_id, product_id]
     )
 
     if (!q.rowCount) return res.status(404).json({ message: 'Not found' })
